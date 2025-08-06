@@ -1,133 +1,91 @@
+# streamlit_app.py
 import streamlit as st
-import pandas as pd
 import numpy as np
-import seaborn as sns
-import matplotlib.pyplot as plt
-import matplotlib.font_manager as fm
+import pandas as pd
 import os
+from sklearn.datasets import load_breast_cancer
+from sklearn.preprocessing import StandardScaler
+from tensorflow.keras.models import load_model
 
 
-fpath = os.path.join(os.getcwd(), './Nanum_Gothic/NanumGothic-Bold.ttf')
-prop = fm.FontProperties(fname=fpath)
-plt.rc('font', family=prop.get_name())
+# ----------------------------------------
+# 1. 모델 로드 (가장 최근 .keras 파일)
+# ----------------------------------------
+MODEL_DIR = "saved_models"
 
 
-# 데이터 로딩
-@st.cache_data
-def data_load():
-    movies = pd.read_csv('./source/m1/movies.dat', delimiter='::', header=None, engine='python', encoding='ISO-8859-1',
-                         names=['MovieID', 'Title', 'Genres'])
-    users = pd.read_csv('./source/m1/users.dat', sep='::', engine='python', header=None,
-                        names=['UserID', 'Gender', 'Age', 'Occupation', 'Zip-code'])
-    ratings = pd.read_csv('./source/m1/ratings.dat', sep='::', engine='python', header=None,
-                          names=['UserID', 'MovieID', 'Rating', 'Timestamp'])
-    return movies, users, ratings
+def get_latest_model():
+    models = [f for f in os.listdir(MODEL_DIR) if f.endswith(".keras")]
+    if not models:
+        return None
+    models.sort(reverse=True)  # 최신 모델이 위에 오도록 정렬
+    return os.path.join(MODEL_DIR, models[0])
 
 
-# merge
-@st.cache_data
-def data_merge(movies, users, ratings):
-    data = ratings.merge(users).merge(movies)
-    recommendation_data = data[['UserID', 'MovieID', 'Rating']]
-    return data, recommendation_data
+latest_model_path = get_latest_model()
+model = load_model(latest_model_path) if latest_model_path else None
 
 
-# pivot
-@st.cache_data
-def data_pivot_corr(recommendation_data):
-    pivot = recommendation_data.pivot(index='UserID', columns='MovieID', values='Rating')
-    pivot.fillna(0, inplace=True)
-    return pivot
+# ----------------------------------------
+# 2. 데이터 로딩 및 스케일링 학습
+# ----------------------------------------
+data = load_breast_cancer()
+X = data.data
+y = data.target
+feature_names = data.feature_names
 
 
-# 유사 사용자
-def nearest_user(corr_matrix, user_id, n):
-    return corr_matrix.loc[user_id].sort_values(ascending=False)[1:n+1]
+scaler = StandardScaler()
+scaler.fit(X)  # 스케일러는 학습 데이터 기준으로 fit
 
 
-# 본 영화 목록
-def movie_seen(recommendation_pivot, user_id, movies):
-    seen = recommendation_pivot.loc[user_id][recommendation_pivot.loc[user_id] > 0]
-    return movies[movies['MovieID'].isin(seen.index)].assign(MyRating=seen.values)
+# ----------------------------------------
+# 3. Streamlit UI
+# ----------------------------------------
+st.title("유방암 진단 예측기 (Breast Cancer Predictor)")
+if model:
+    st.markdown(f"불러온 모델: `{os.path.basename(latest_model_path)}`")
+else:
+    st.error("저장된 모델을 찾을 수 없습니다. 학습을 먼저 진행하세요.")
 
 
-# 추천
-def recommend_movie(pivot, data, movies, user_id, n=2):
-    corr = pivot.T.iloc[:500, :500].corr()
-    similar_users = nearest_user(corr, user_id, n).index
-    sim_user_corr = nearest_user(corr, user_id, n)
-    similar_data = data[(data.UserID.isin(similar_users)) & (data.Rating == 5)]
-    seen = pivot.loc[user_id][pivot.loc[user_id] > 0]
-    unseen = set(similar_data['MovieID']) - set(seen.index)
-    return movies[movies['MovieID'].isin(unseen)].reset_index(drop=True), sim_user_corr
+st.sidebar.header("입력값을 설정하세요")
 
 
+# 사용자 입력값 (슬라이더로 30개 특성)
+user_input = []
+for i, feature in enumerate(feature_names):
+    val = st.sidebar.slider(
+        label=feature,
+        min_value=float(X[:, i].min()),
+        max_value=float(X[:, i].max()),
+        value=float(X[:, i].mean()),
+        format="%.2f"
+    )
+    user_input.append(val)
 
 
+user_array = np.array(user_input).reshape(1, -1)
+scaled_input = scaler.transform(user_array)
 
 
-# main
-def main():
+# ----------------------------------------
+# 4. 예측 수행
+# ----------------------------------------
+if st.button("예측 실행") and model:
+    pred_prob = model.predict(scaled_input)[0][0]
+    pred_class = int(pred_prob > 0.5)
 
 
+    st.subheader("예측 결과")
+    st.write(f"예측 확률 (악성일 확률): **{pred_prob * 100:.2f}%**")
+    st.write(f"예측 결과: **{'악성(Malignant)' if pred_class == 1 else '양성(Benign)'}**")
 
 
-
-
-
-
-
-
-
-
-    st.title("사용자 기반 영화 추천 시스템")
-    st.markdown("**유사 사용자 기반 협업 필터링**으로 추천합니다.")
-
-
-
-
-    with st.spinner("데이터 로딩 중..."):
-        movies, users, ratings = data_load()
-        full_data, recommendation_data = data_merge(movies, users, ratings)
-        pivot = data_pivot_corr(recommendation_data)
-
-
-    user_id = st.selectbox("사용자 선택", pivot.index.tolist())
-    top_n = st.slider("추천받을 영화 수", 1, 10, 3)
-
-
-    if st.button("영화 추천받기"):
-        with st.spinner("추천 처리 중..."):
-            recommended_movies, sim_user_corr = recommend_movie(pivot, recommendation_data, movies, user_id, top_n)
-            seen_movies = movie_seen(pivot, user_id, movies)
-
-
-        st.subheader("내가 본 영화 목록")
-        st.dataframe(seen_movies[['Title', 'Genres', 'MyRating']].sort_values('MyRating', ascending=False))
-
-
-        st.subheader("유사 사용자 Top-N")
-        st.table(pd.DataFrame({
-            "UserID": sim_user_corr.index,
-            "상관계수": sim_user_corr.values
-        }))
-
-
-        st.subheader("유사 사용자 상관계수 시각화")
-        fig, ax = plt.subplots(figsize=(6, 4))
-        sns.barplot(x=sim_user_corr.values, y=sim_user_corr.index, ax=ax)
-        ax.set_xlabel("상관계수")
-        ax.set_ylabel("UserID")
-        ax.set_title("Top-N 유사 사용자 상관계수")
-        st.pyplot(fig)
-
-
-        st.subheader("추천 영화 목록")
-        st.dataframe(recommended_movies[['Title', 'Genres']])
-
-
-if __name__ == '__main__':
-    main()
+    if pred_class == 1:
+        st.error("악성(Malignant) 가능성이 높습니다.")
+    else:
+        st.success("양성(Benign) 가능성이 높습니다.")
 
 
 
